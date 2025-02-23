@@ -146,6 +146,16 @@ class VirtualFileSystem:
         self.log_action(f"Created directory '{dirname}'")
         print(f"Directory '{dirname}' created.")
 
+    def touch(self, filename):
+        """ Create an empty file if it does not exist """
+        path = self._resolve_path(filename)
+        if path in self.current_directory.children:
+            print(f"Error: File '{filename}' already exists.")
+            return
+        self.current_directory.children[path] = FileNode(filename, False, owner=self.current_user)
+        self.log_action(f"Created empty file '{filename}'")
+        print(f"File '{filename}' created.")
+
     def ls(self, path=None):
         """ List files and directories in the current directory """
         path = self._resolve_path(path or self.current_directory.name)
@@ -394,7 +404,7 @@ def main():
         if cmd == "mkdir" and args:
             vfs.mkdir(args[0])
         elif cmd == "ls":
-            print(vfs.ls(args[0] if args else None))
+            vfs.ls(args[0] if args else None)
         elif cmd == "touch" and args:
             vfs.touch(args[0])
         elif cmd == "write" and len(args) >= 2:
