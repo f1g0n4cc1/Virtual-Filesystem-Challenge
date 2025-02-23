@@ -142,17 +142,21 @@ class VirtualFileSystem:
         if path in self.current_directory.children:
             print(f"Error: Directory '{dirname}' already exists.")
             return
-        self.current_directory.children[dirname] = FileNode(dirname, True, owner=self.current_user)
+        self.current_directory.children[dirname] = FileNode(dirname, True, owner=self.current_user, parent=self.current_directory)
         self.log_action(f"Created directory '{dirname}'")
         print(f"Directory '{dirname}' created.")
 
     def ls(self, path=None):
         """ List files and directories in the current directory """
         path = self._resolve_path(path or self.current_directory.name)
-        if path not in self.current_directory.children:
+        if path == '/':
+            node = self.root
+        elif path not in self.current_directory.children:
             print(f"Error: Directory '{path}' does not exist.")
             return
-        node = self.current_directory.children[path]
+        else:
+            node = self.current_directory.children[path]
+
         if node.is_directory:
             print(" ".join(node.children.keys()))
         else:
@@ -161,7 +165,7 @@ class VirtualFileSystem:
     def cd(self, dirname):
         """ Change the current directory """
         path = self._resolve_path(dirname)
-        if path == "..":
+        if dirname == "..":
             if self.current_directory.parent:
                 self.current_directory = self.current_directory.parent
             else:
