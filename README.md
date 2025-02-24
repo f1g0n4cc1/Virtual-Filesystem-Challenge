@@ -1,94 +1,111 @@
-# Virtual Filesystem (VFS)
+# Virtual Filesystem Challenge
 
-## Project Overview
+## Overview
 
-This project is an in-memory virtual filesystem (VFS) that supports standard file operations while remaining independent of physical disk storage. It includes features such as file and directory creation/deletion, content reading/writing, directory listing, metadata tracking, and path navigation. The project also supports symbolic links, user permissions, file search capabilities, state persistence across sessions, and operation logging.
+The Virtual Filesystem Challenge is an educational project that implements a simple, in-memory virtual filesystem (VFS). It includes user authentication, file and directory management, permission handling, symlinks, and quota enforcement. The project focuses on filesystem structure, security, and user role management.
 
 ## Features
 
-### Core Filesystem Features
-- **File and Directory Management**: Create and delete files and directories.
-- **Content Manipulation**: Read and write to files.
-- **Directory Listing**: List directory contents.
-- **Metadata Tracking**: Track file size, creation time, modification time, etc.
-- **Path Navigation**: Support both relative and absolute paths.
+- **File and Directory Management**: Create, delete, move, copy, and list files and directories.
+- **Permissions & Roles**: Supports admin, editor, and viewer roles with different access levels.
+- **User Authentication**: Secure login system using bcrypt for password hashing.
+- **Symlinks**: Supports symbolic links for file redirection.
+- **Quota Management**: Enforces user and group-based storage limits.
+- **Logging**: Keeps track of filesystem actions for auditability.
+- **Persistent Storage**: Saves and loads the filesystem state using JSON.
+- **Command-Line Interface**: Interactive shell to execute filesystem commands.
+- **Access Control Mechanism**: Granular permissions per user and group.
 
-### Interface Requirements
-- **Programmatic API**: Functions for filesystem operations.
-- **Command-Line Interface (CLI)**: A shell-like interface with Unix-like commands (`ls`, `cd`, `mkdir`, etc.).
-
-### Optional Enhancements
-- **User Permission System**: Implement file ownership and access control.
-- **Symbolic Link Support**: Support soft links (`ln -s`).
-- **File Search Capabilities**: Implement searching by filename and content.
-- **State Persistence**: Save and restore the filesystem across sessions.
-- **Operation Logging**: Track operations for debugging or auditing.
-
-## Technical Constraints
-- **Memory-Only**: Everything must be stored in RAM.
-- **Consistency**: Ensure the filesystem remains stable and doesn't corrupt data.
-- **Error Handling**: Handle invalid commands, missing files, etc.
-- **Language Choice**: Implemented in Python.
-- **LLM Assistance**: Implementation fully understood by the developer.
-
-## Getting Started
+## Installation
 
 ### Prerequisites
+
 - Python 3.x
-- `pycryptodome` library for encryption
-- `bcrypt` library for password hashing
+- Required Python libraries: bcrypt
 
-### Installation
-Install the required libraries using pip:
+### Install Dependencies
+
 ```sh
-pip install pycryptodome bcrypt
+pip install bcrypt
+
+```markdown
+# Virtual Filesystem Challenge
+
+## Overview
+
+The Virtual Filesystem Challenge is an educational project that implements a simple, in-memory virtual filesystem (VFS). It includes user authentication, file and directory management, permission handling, symlinks, and quota enforcement. The project focuses on filesystem structure, security, and user role management.
+
+## Features
+
+- **File and Directory Management**: Create, delete, move, copy, and list files and directories.
+- **Permissions & Roles**: Supports admin, editor, and viewer roles with different access levels.
+- **User Authentication**: Secure login system using bcrypt for password hashing.
+- **Symlinks**: Supports symbolic links for file redirection.
+- **Quota Management**: Enforces user and group-based storage limits.
+- **Logging**: Keeps track of filesystem actions for auditability.
+- **Persistent Storage**: Saves and loads the filesystem state using JSON.
+- **Command-Line Interface**: Interactive shell to execute filesystem commands.
+- **Access Control Mechanism**: Granular permissions per user and group.
+
+## Installation
+
+### Prerequisites
+
+- Python 3.x
+- Required Python libraries: bcrypt
+
+### Install Dependencies
+
+```sh
+pip install bcrypt
 ```
 
-### Running the Virtual Filesystem
-Run the `virtual_filesystem.py` script:
+## Usage
+
+### Running the Filesystem
+
 ```sh
-python virtual_filesystem.py
+python vfs.py
 ```
 
-### Example Commands
-Here are some example commands you can try in the CLI:
+### Available Commands
 
-- **Create a Directory**: `mkdir mydir`
-- **List Directory Contents**: `ls`
-- **Create a File**: `touch myfile.txt`
-- **Write to a File**: `write myfile.txt "Hello, World!"`
-- **Read a File**: `cat myfile.txt`
-- **Create a Symbolic Link**: `ln_s myfile.txt mylink.txt`
-- **Read a File through Symlink**: `cat mylink.txt`
-- **Move a File**: `mv myfile.txt newfile.txt`
-- **Copy a File**: `cp newfile.txt copyfile.txt`
-- **Remove a File**: `rm copyfile.txt`
-- **Change Directory**: `cd mydir`
-- **Go Back to Parent Directory**: `cd ..`
-- **Find Files by Name**: `find myfile`
-- **Find Files by Content**: `find "Hello" --content`
-- **Change File Permissions**: `chmod newfile.txt g+w`
-- **Change File Owner**: `chown newfile.txt newowner`
-- **Change File Group**: `chgrp newfile.txt newgroup`
-- **Exit and Save State**: `exit`
+- `mkdir <directory>`: Create a new directory.
+- `touch <filename>`: Create an empty file.
+- `write <filename> <content>`: Write content to a file.
+- `read <filename>`: Read content from a file.
+- `ls [-l] [directory]`: List files and directories.
+- `cd <directory>`: Change current directory.
+- `rm <filename>`: Delete a file.
+- `mv <source> <destination>`: Move or rename a file.
+- `cp <source> <destination>`: Copy a file.
+- `ln -s <target> <symlink>`: Create a symbolic link.
+- `quota`: Display user storage quota usage.
 
-## API Design Decisions
-- **Filesystem Structure**: Implemented as a tree-like structure using nested dictionaries.
-- **FileNode Class**: Represents files and directories.
-- **VirtualFileSystem Class**: Manages the filesystem operations and interactions.
+### User Management
 
-## Data Structure Choices
-- **FileNode**: Represents each file and directory with attributes such as name, type, owner, permissions, content, etc.
-- **VirtualFileSystem**: Manages the overall filesystem, including user management, command execution, and state persistence.
+- `adduser <username> <password> <role>`: Add a new user.
+- `passwd <username> <new_password>`: Change a user's password.
+- `chown <filename> <new_owner>`: Change file owner.
+- `chmod <filename> <permissions>`: Modify file permissions.
 
-## Known Limitations & Areas for Improvement
-- **Advanced Unix Commands**: Commands like `rm -r`, `cp -r`, etc., are not implemented.
-- **User Authentication**: Currently uses plaintext storage for demonstration; consider enhancing security.
-- **Concurrency**: The current implementation does not support concurrent access.
-- **Performance**: The in-memory structure may not be efficient for very large filesystems.
+## Security Features
+
+- **User Authentication**: Passwords are securely hashed using bcrypt.
+- **Role-Based Access Control**: Ensures restricted file access based on user roles.
+- **Quota Enforcement**: Prevents excessive storage usage.
+- **Logging**: Tracks user activities for accountability.
+- **Symlink Security Checks**: Prevents unauthorized link redirections.
+
+## Future Improvements
+
+- Implement ACLs for fine-grained permission control.
+- Add networked filesystem capabilities.
+- Improve efficiency with tree-based data structures.
+- Integrate encryption for enhanced security.
+- Implement journaling for crash recovery.
 
 ## License
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-## Acknowledgments
-- The project was developed with assistance from GitHub Copilot.
+This project is released under the MIT License.
+```

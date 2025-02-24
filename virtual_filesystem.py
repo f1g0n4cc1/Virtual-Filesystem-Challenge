@@ -1,8 +1,6 @@
 import os
 import json
 from datetime import datetime
-from Crypto.Cipher import AES
-import base64
 import bcrypt
 
 class FileNode:
@@ -19,7 +17,6 @@ class FileNode:
         self.target = target  # Points to target file/directory for symlinks
 
 class VirtualFileSystem:
-    SECRET_KEY = b"thisisaverysecurekey123456"  # 32-byte key for AES-256
     LOG_FILE = "vfs.log"
     SAVE_FILE = "filesystem_state.json"
     DEFAULT_USER_QUOTA = 1024 * 1024  # 1 MB per user
@@ -37,7 +34,6 @@ class VirtualFileSystem:
         self.groups = {"root": self.DEFAULT_GROUP_QUOTA}
         self.versions = {}  # Stores file history
         self.current_user = "root"
-        self.load_state()  # Load saved state when starting the program
 
     def hash_password(self, password):
         """ Hashes a password using bcrypt """
@@ -47,395 +43,404 @@ class VirtualFileSystem:
         """ Verifies a password """
         return bcrypt.checkpw(provided_password.encode(), stored_password)
 
-    def pad(self, data):
-        """ Pads data for AES encryption """
-        return data + (16 - len(data) % 16) * b" "
-
-    def encrypt(self, plaintext):
-        """ Encrypts data using AES-256 """
-        cipher = AES.new(self.SECRET_KEY, AES.MODE_ECB)
-        return base64.b64encode(cipher.encrypt(self.pad(plaintext.encode()))).decode()
-
-    def decrypt(self, encrypted_text):
-        """ Decrypts AES-256 encrypted data """
-        cipher = AES.new(self.SECRET_KEY, AES.MODE_ECB)
-        return cipher.decrypt(base64.b64decode(encrypted_text)).decode().strip()
-
     def log_action(self, action):
         """ Logs actions with a timestamp """
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         log_entry = f"[{timestamp}] {self.current_user}: {action}\n"
         
-        with open(self.LOG_FILE, "a") as log:
-            log.write(log_entry)
+        # Log to file
+        with open(self.LOG_FILE, "a") as log_file:
+            log_file.write(log_entry)
+        
+        # Log to in-memory log
+        if not hasattr(self, 'logs'):
+            self.logs = []
+        self.logs.append(log_entry)
 
     def _resolve_path(self, path):
         """ Resolve relative paths to absolute paths """
         if path.startswith('/'):
-            return path  # Already absolute
-        if self.current_directory.name == '/':
-            return '/' + path
-        return self.current_directory.name.rstrip('/') + '/' + path
-
-    def ln_s(self, target, link_name):
-        """ Create a symbolic link (ln -s) """
-        target_path = self._resolve_path(target)
-        link_path = self._resolve_path(link_name)
+            # Absolute path
+            return path
         
-        if link_path in self.current_directory.children:
-            print(f"Error: '{link_name}' already exists.")
-            return
-        if target_path not in self.current_directory.children:
-            print(f"Error: Target '{target}' does not exist.")
-            return
-        # Create symlink node pointing to the target
-        self.current_directory.children[link_name] = FileNode(link_name, False, owner=self.current_user, is_symlink=True, target=target_path)
-        self.log_action(f"Created symlink '{link_name}' -> '{target}'")
+        # Split the path into parts
+        parts = path.split('/')
+        
+        # Start from the current directory
+        if self.current_directory.name == '/':
+            stack = []
+        else:
+            stack = self.current_directory.name.strip('/').split('/')
+        
+        # Process each part of the path
+        for part in parts:
+            if part == '..':
+                # Move up to the parent directory
+                if stack:
+                    stack.pop()
+            elif part and part != '.':
+                # Add the directory or file to the stack
+                stack.append(part)
+        
+        # Join the stack to form the absolute path
+        return '/' + '/'.join(stack)
 
-    def read_file(self, filename):
-        """ Read a file's content if the user has permission """
-        path = self._resolve_path(filename)
-        if path not in self.current_directory.children:
-            print(f"Error: File '{filename}' does not exist.")
-            return
+    def _follow_symlink(self, node):
+        """ Follow symlink to the target node """
+        while node.is_symlink:
+            target = node.target
+            parts = target.strip('/').split('/')
+            current = self.root
+            for part in parts:
+                if part in current.children:
+                    current = current.children[part]
+                else:
+                    print(f"Error: Symlink target '{target}' does not exist.")
+                    return None
+            node = current
+        return node
 
-        node = self.current_directory.children[path]
-        if node.is_symlink:
-            node = self.current_directory.children[node.target]  # Follow symlink
+    def _get_node(self, path):
+        """ Helper function to get the node from the path """
+        if path == '/':
+            return self.root
+        
+        # Resolve the path to an absolute path
+        abs_path = self._resolve_path(path)
+        parts = abs_path.strip('/').split('/')
+        
+        # Traverse the filesystem hierarchy
+        current = self.root
+        for part in parts:
+            if part in current.children:
+                current = current.children[part]
+                if current.is_symlink:
+                    current = self._follow_symlink(current)
+                    if current is None:
+                        return None
+            else:
+                print(f"Error: Path '{abs_path}' does not exist.")
+                return None
+        return current
 
-        if node.is_directory:
-            print("Error: Cannot read a directory!")
-            return
+    def _path_exists(self, path):
+        """ Check if a path exists """
+        return self._get_node(path) is not None
 
-        if not self.has_permission(node, "r"):
-            print(f"Permission denied: Cannot read '{filename}'.")
-            return
+    def _check_permissions(self, node, action):
+        """ Check if the current user has the necessary permissions on the node for the given action """
+        role = self.users[self.current_user]['role']
+        return self.ROLES[role].get(action, False)
 
-        print(node.content)
+    def _check_quota(self, size):
+        """ Check if the current user and group have enough quota left """
+        user_quota = self.users[self.current_user]['quota']
+        group = self.users[self.current_user]['groups'][0]
+        group_quota = self.groups.get(group, self.DEFAULT_GROUP_QUOTA)
+        
+        # Calculate used space (for simplicity, only consider file content size)
+        used_space = sum(len(node.content) for node in self._all_files(self.root) if node.owner == self.current_user)
+        used_group_space = sum(len(node.content) for node in self._all_files(self.root) if node.group == group)
+        
+        if used_space + size > user_quota:
+            print(f"Error: User '{self.current_user}' has exceeded their quota.")
+            return False
+        if used_group_space + size > group_quota:
+            print(f"Error: Group '{group}' has exceeded its quota.")
+            return False
+        return True
 
-    def write_file(self, filename, content):
-        """ Write to a file if the user has permission """
-        path = self._resolve_path(filename)
-        if path not in self.current_directory.children:
-            print(f"Error: File '{filename}' does not exist.")
-            return
-
-        node = self.current_directory.children[path]
-        if node.is_symlink:
-            node = self.current_directory.children[node.target]  # Follow symlink
-
-        if node.is_directory:
-            print("Error: Cannot write to a directory!")
-            return
-
-        if not self.has_permission(node, "w"):
-            print(f"Permission denied: Cannot write to '{filename}'.")
-            return
-
-        node.content = content
-        self.log_action(f"Wrote to file '{filename}'")
-        print(f"File '{filename}' updated.")
+    def _all_files(self, node):
+        """ Generator to yield all files in the filesystem """
+        if not node.is_directory:
+            yield node
+        else:
+            for child in node.children.values():
+                yield from self._all_files(child)
 
     def mkdir(self, dirname):
         """ Create a new directory inside the current directory """
+        if not dirname:
+            print("Error: Directory name cannot be empty.")
+            return
         path = self._resolve_path(dirname)
-        if path in self.current_directory.children:
+        parts = path.strip('/').split('/')
+        current = self.root
+        for part in parts[:-1]:
+            if part in current.children:
+                current = current.children[part]
+            else:
+                print(f"Error: Parent directory '{'/'.join(parts[:-1])}' does not exist.")
+                return
+        if parts[-1] in current.children:
             print(f"Error: Directory '{dirname}' already exists.")
             return
-        self.current_directory.children[dirname] = FileNode(dirname, True, owner=self.current_user, parent=self.current_directory)
+        current.children[parts[-1]] = FileNode(parts[-1], True, owner=self.current_user, parent=current)
         self.log_action(f"Created directory '{dirname}'")
         print(f"Directory '{dirname}' created.")
 
     def touch(self, filename):
         """ Create an empty file if it does not exist """
+        if not filename:
+            print("Error: Filename cannot be empty.")
+            return
         path = self._resolve_path(filename)
-        if path in self.current_directory.children:
+        parts = path.strip('/').split('/')
+        current = self.root
+        for part in parts[:-1]:
+            if part in current.children:
+                current = current.children[part]
+            else:
+                print(f"Error: Parent directory '{'/'.join(parts[:-1])}' does not exist.")
+                return
+        if parts[-1] in current.children:
             print(f"Error: File '{filename}' already exists.")
             return
-        self.current_directory.children[path] = FileNode(filename, False, owner=self.current_user)
+        current.children[parts[-1]] = FileNode(parts[-1], False, owner=self.current_user, parent=current)
         self.log_action(f"Created empty file '{filename}'")
         print(f"File '{filename}' created.")
 
+    def write(self, filename, content):
+        """ Write content to a file """
+        if not filename:
+            print("Error: Filename cannot be empty.")
+            return
+        # Resolve the file path
+        path = self._resolve_path(filename)
+        
+        # Check if the file exists
+        node = self._get_node(path)
+        if node is None or node.is_directory:
+            print(f"Error: File '{filename}' does not exist or is a directory.")
+            return
+        if not self._check_permissions(node, 'write'):
+            print(f"Error: User '{self.current_user}' does not have write permission for '{filename}'.")
+            return
+        if not self._check_quota(len(content)):
+            return
+        
+        # Write content to the file
+        node.content = content
+        self.log_action(f"Written to file '{filename}'")
+        print(f"Content written to file '{filename}'.")
+
+    def read(self, filename):
+        """ Read content from a file """
+        if not filename:
+            print("Error: Filename cannot be empty.")
+            return
+        path = self._resolve_path(filename)
+        node = self._get_node(path)
+        if node is None or node.is_directory:
+            print(f"Error: File '{filename}' does not exist or is a directory.")
+            return
+        if not self._check_permissions(node, 'read'):
+            print(f"Error: User '{self.current_user}' does not have read permission for '{filename}'.")
+            return
+        self.log_action(f"Read from file '{filename}'")
+        return node.content
+
     def ls(self, path=None):
         """ List files and directories in the current directory """
-        path = self._resolve_path(path or self.current_directory.name)
-        if path == '/':
-            node = self.root
-        elif path not in self.current_directory.children:
+        if path and path.startswith('-'):  # Handle options like -l
+            option = path
+            path = None
+        else:
+            option = None
+        
+        if path is None:
+            node = self.current_directory
+        else:
+            node = self._get_node(self._resolve_path(path))
+        
+        if node is None:
             print(f"Error: Directory '{path}' does not exist.")
             return
-        else:
-            node = self.current_directory.children[path]
-
+        
         if node.is_directory:
-            print(" ".join(node.children.keys()))
+            if option == '-l':
+                for child_name, child_node in node.children.items():
+                    permissions = child_node.permissions
+                    owner = child_node.owner
+                    size = len(child_node.content) if not child_node.is_directory else 0
+                    print(f"{permissions} {owner} {size} {child_name}")
+            else:
+                print(" ".join(node.children.keys()))
         else:
             print(f"{path} is a file, not a directory!")
 
     def cd(self, dirname):
         """ Change the current directory """
         path = self._resolve_path(dirname)
-        if dirname == "..":
-            if self.current_directory.parent:
-                self.current_directory = self.current_directory.parent
-            else:
-                print("Error: Already at the root directory.")
-            return
-        if path not in self.current_directory.children:
-            print(f"Error: Directory '{dirname}' does not exist.")
-            return
-        node = self.current_directory.children[path]
-        if not node.is_directory:
-            print(f"Error: '{dirname}' is a file, not a directory!")
+        node = self._get_node(path)
+        if node is None or not node.is_directory:
+            print(f"Error: Directory '{path}' does not exist.")
             return
         self.current_directory = node
-        print(f"Changed directory to '{dirname}'")
+        print(f"Changed directory to '{path}'")
 
     def rm(self, filename):
         """ Remove a file """
+        if not filename:
+            print("Error: Filename cannot be empty.")
+            return
         path = self._resolve_path(filename)
-        if path not in self.current_directory.children:
+        node = self._get_node(path)
+        if node is None or node.is_directory:
             print(f"Error: File '{filename}' does not exist.")
             return
-        del self.current_directory.children[path]
+        if not self._check_permissions(node, 'write'):
+            print(f"Error: User '{self.current_user}' does not have write permission for '{filename}'.")
+            return
+        del node.parent.children[filename]
         self.log_action(f"Removed file '{filename}'")
         print(f"File '{filename}' removed.")
 
     def mv(self, src, dest):
         """ Move or rename a file """
+        if not src or not dest:
+            print("Error: Source and destination cannot be empty.")
+            return
         src_path = self._resolve_path(src)
         dest_path = self._resolve_path(dest)
-        if src_path not in self.current_directory.children:
+        node = self._get_node(src_path)
+        if not node:
             print(f"Error: Source '{src}' does not exist.")
             return
-        if dest_path in self.current_directory.children:
+        if self._path_exists(dest_path):
             print(f"Error: Destination '{dest}' already exists.")
             return
-        self.current_directory.children[dest_path] = self.current_directory.children.pop(src_path)
+        if not self._check_permissions(node, 'write'):
+            print(f"Error: User '{self.current_user}' does not have write permission for '{src}'.")
+            return
+        node.name = dest_path.split('/')[-1]
+        if node.parent:
+            del node.parent.children[src.split('/')[-1]]
+        dest_parent_path = '/'.join(dest_path.split('/')[:-1])
+        dest_parent = self._get_node(dest_parent_path) or self.root
+        dest_parent.children[node.name] = node
+        node.parent = dest_parent
         self.log_action(f"Moved '{src}' to '{dest}'")
         print(f"Moved '{src}' to '{dest}'")
 
     def cp(self, src, dest):
         """ Copy a file """
+        if not src or not dest:
+            print("Error: Source and destination cannot be empty.")
+            return
         src_path = self._resolve_path(src)
         dest_path = self._resolve_path(dest)
-        if src_path not in self.current_directory.children:
+        node = self._get_node(src_path)
+        if not node:
             print(f"Error: Source '{src}' does not exist.")
             return
-        if dest_path in self.current_directory.children:
+        if self._path_exists(dest_path):
             print(f"Error: Destination '{dest}' already exists.")
             return
-        node = self.current_directory.children[src_path]
+        if not self._check_permissions(node, 'read'):
+            print(f"Error: User '{self.current_user}' does not have read permission for '{src}'.")
+            return
         if node.is_directory:
             print("Error: Cannot copy a directory!")
             return
-        self.current_directory.children[dest_path] = FileNode(dest, False, owner=self.current_user, content=node.content)
+        if not self._check_quota(len(node.content)):
+            return
+        dest_parent_path = '/'.join(dest_path.split('/')[:-1])
+        dest_parent = self._get_node(dest_parent_path) or self.root
+        dest_name = dest_path.split('/')[-1]
+        dest_parent.children[dest_name] = FileNode(dest_name, False, owner=self.current_user, content=node.content)
         self.log_action(f"Copied '{src}' to '{dest}'")
         print(f"Copied '{src}' to '{dest}'")
 
-    def find(self, name, search_content=False, exact_match=False, case_insensitive=False):
-        """ Find a file by name or content """
-        results = []
-        name_to_search = name.lower() if case_insensitive else name
-        
-        def search(node, name):
-            if node.is_symlink:
-                node = self.current_directory.children[node.target]  # Follow symlink
-            if node.is_directory:
-                for child_name, child_node in node.children.items():
-                    search(child_node, name)
-            else:
-                node_name = child_name.lower() if case_insensitive else child_name
-                node_content = node.content.lower() if case_insensitive else node.content
-                if exact_match:
-                    if name_to_search == node_name or (search_content and name_to_search == node_content):
-                        results.append(node.name)
-                else:
-                    if name_to_search in node_name or (search_content and name_to_search in node_content):
-                        results.append(node.name)
-
-        search(self.current_directory, name)
-        return results
-
-    def has_permission(self, node, permission_type):
-        """ Checks if the current user has the requested permission """
-        if self.current_user == "root":
-            return True  # Root always has full access
-
-        owner_perms = node.permissions[:3]  # Owner permissions
-        group_perms = node.permissions[3:6]  # Group permissions
-        other_perms = node.permissions[6:]  # Other permissions
-
-        user_groups = self.users[self.current_user]["groups"]
-
-        if self.current_user == node.owner:
-            perms = owner_perms
-        elif node.group in user_groups:
-            perms = group_perms
-        else:
-            perms = other_perms
-
-        return permission_type in perms
-
-    def chmod(self, filename, permission_change):
-        """ Modifies the permissions of a file (supports group modifications) """
-        path = self._resolve_path(filename)
-        if path not in self.current_directory.children:
-            print(f"Error: File '{filename}' does not exist.")
-            return
-
-        node = self.current_directory.children[path]
-
-        if self.current_user != node.owner and self.current_user != "root":
-            print(f"Permission denied: Cannot modify '{filename}' permissions.")
-            return
-
-        if permission_change.startswith("g+"):
-            node.permissions = node.permissions[:3] + "rwx" + node.permissions[6:]
-            print(f"Granted full group permissions to '{filename}'")
-
-        elif permission_change.startswith("g-"):
-            node.permissions = node.permissions[:3] + "---" + node.permissions[6:]
-            print(f"Removed all group permissions from '{filename}'")
-
-        else:
-            print("Invalid permission format. Use 'g+w' or 'g-r'.")
-
-    def chown(self, filename, new_owner):
-        """ Changes the owner of a file (only root or the current owner can do this) """
-        path = self._resolve_path(filename)
-        if path not in self.current_directory.children:
-            print(f"Error: File '{filename}' does not exist.")
-            return
-
-        node = self.current_directory.children[path]
-
-        if self.current_user != node.owner and self.current_user != "root":
-            print(f"Permission denied: Cannot change ownership of '{filename}'.")
-            return
-
-        if new_owner not in self.users:
-            print(f"Error: User '{new_owner}' does not exist.")
-            return
-
-        node.owner = new_owner
-        print(f"Ownership of '{filename}' changed to '{new_owner}'.")
-
-    def chgrp(self, filename, new_group):
-        """ Changes the group ownership of a file (only root or the owner can do this) """
-        path = self._resolve_path(filename)
-        if path not in self.current_directory.children:
-            print(f"Error: File '{filename}' does not exist.")
-            return
-
-        node = self.current_directory.children[path]
-
-        if self.current_user != node.owner and self.current_user != "root":
-            print(f"Permission denied: Cannot change group of '{filename}'.")
-            return
-
-        for user in self.users:
-            if new_group in self.users[user]["groups"]:
-                node.group = new_group
-                print(f"Group of '{filename}' changed to '{new_group}'.")
-                return
-
-        print(f"Error: Group '{new_group}' does not exist.")
-
     def save_state(self):
-        """ Saves the filesystem and user data to a JSON file """
-        data = {
-            "users": {user: {"password": self.users[user]["password"].decode(), "groups": self.users[user]["groups"], "role": self.users[user]["role"], "quota": self.users[user]["quota"]}
-                      for user in self.users},
-            "files": self.serialize_files(self.root)
-        }
+        """ Save the current state of the filesystem """
+        data = self._serialize_files(self.root)
         with open(self.SAVE_FILE, "w") as f:
-            json.dump(data, f, indent=4)
-        print("Filesystem state saved.")
-
+            json.dump(data, f)
+        self.log_action("Saved filesystem state")
+        print("File system state saved.")
+    
     def load_state(self):
-        """ Loads the filesystem and user data from a JSON file """
-        if not os.path.exists(self.SAVE_FILE):
-            return  # No saved data yet
+        """ Load the filesystem state from a saved file """
+        if os.path.exists(self.SAVE_FILE):
+            with open(self.SAVE_FILE, "r") as f:
+                data = json.load(f)
+                self.root = self._deserialize_files(data)
+                self.current_directory = self.root  # Ensure current directory is reset to root
+            self.log_action("Loaded filesystem state")
+            print("File system state loaded.")
 
-        with open(self.SAVE_FILE, "r") as f:
-            data = json.load(f)
-
-        self.users = {user: {"password": data["users"][user]["password"].encode(), "groups": data["users"][user]["groups"], "role": data["users"][user]["role"], "quota": data["users"][user]["quota"]}
-                      for user in data["users"]}
-        self.root = self.deserialize_files(data["files"])
-        print("Filesystem state loaded.")
-
-    def serialize_files(self, node):
-        """ Recursively serialize the filesystem """
-        return {
+    def _serialize_files(self, node):
+        """ Serializes the file system """
+        serialized = {
             "name": node.name,
             "is_directory": node.is_directory,
             "owner": node.owner,
             "group": node.group,
             "permissions": node.permissions,
-            "content": node.content if not node.is_directory else None,
-            "children": {name: self.serialize_files(child) for name, child in node.children.items()} if node.is_directory else None,
             "is_symlink": node.is_symlink,
-            "target": node.target
+            "target": node.target,
+            "children": {k: self._serialize_files(v) for k, v in node.children.items()} if node.is_directory else {},
+            "content": node.content if not node.is_directory else None
         }
+        return serialized
 
-    def deserialize_files(self, data):
-        """ Recursively deserialize the filesystem """
-        node = FileNode(data["name"], data["is_directory"], data["owner"], data["group"], data["permissions"], is_symlink=data.get("is_symlink", False), target=data.get("target"))
-        if data["is_directory"]:
-            node.children = {name: self.deserialize_files(child) for name, child in data["children"].items()}
+    def _deserialize_files(self, data):
+        """ Deserialize the file system data """
+        node = FileNode(data['name'], data['is_directory'], owner=data['owner'], group=data['group'], permissions=data['permissions'], is_symlink=data['is_symlink'], target=data['target'])
+        if data['is_directory']:
+            node.children = {k: self._deserialize_files(v) for k, v in data['children'].items()}
         else:
-            node.content = data.get("content", "")
+            node.content = data.get('content', '')
         return node
 
-# Example CLI for testing
-def main():
+# Command-line interface (CLI)
+if __name__ == "__main__":
     vfs = VirtualFileSystem()
-
+    
     while True:
-        command = input("VFS> ").strip().split()
-        if not command:
+        cmd = input(f"{vfs.current_user}@vfs:{vfs.current_directory.name}$ ").strip().split()
+        if not cmd:
             continue
+        command = cmd[0]
+        args = cmd[1:]
 
-        cmd = command[0]
-        args = command[1:]
-
-        if cmd == "mkdir" and args:
-            vfs.mkdir(args[0])
-        elif cmd == "ls":
-            vfs.ls(args[0] if args else None)
-        elif cmd == "touch" and args:
-            vfs.touch(args[0])
-        elif cmd == "write" and len(args) >= 2:
-            filename = args[0]
-            content = " ".join(args[1:])
-            vfs.write_file(filename, content)
-        elif cmd == "cat" and args:
-            vfs.read_file(args[0])
-        elif cmd == "cd" and args:
-            vfs.cd(args[0])
-        elif cmd == "rm" and args:
-            vfs.rm(args[0])
-        elif cmd == "mv" and len(args) == 2:
-            vfs.mv(args[0], args[1])
-        elif cmd == "cp" and len(args) == 2:
-            vfs.cp(args[0], args[1])
-        elif cmd == "ln_s" and len(args) == 2:
-            vfs.ln_s(args[0], args[1])
-        elif cmd == "find" and args:
-            search_content = '--content' in args
-            exact_match = '--exact' in args
-            case_insensitive = '--case-insensitive' in args
-            name = args[0]
-            results = vfs.find(name, search_content=search_content, exact_match=exact_match, case_insensitive=case_insensitive)
-            print(results)
-        elif cmd == "exit":
-            print("Exiting Virtual Filesystem.")
+        if command == "ls":
+            vfs.ls(*args)
+        elif command == "cd":
+            vfs.cd(*args)
+        elif command == "mkdir":
+            vfs.mkdir(*args)
+        elif command == "touch":
+            vfs.touch(*args)
+        elif command == "rm":
+            vfs.rm(*args)
+        elif command == "mv":
+            vfs.mv(*args)
+        elif command == "cp":
+            vfs.cp(*args)
+        elif command == "ln":
+            if args and args[0] == "-s" and len(args) == 3:
+                vfs.ln_s(args[1], args[2])
+            else:
+                print("Usage: ln -s <target> <link_name>")
+        elif command == "write":
+            if len(args) == 2:
+                vfs.write(args[0], args[1])
+            else:
+                print("Usage: write <filename> <content>")
+        elif command in ["read", "cat"]:
+            if len(args) == 1:
+                content = vfs.read(args[0])
+                if content is not None:
+                    print(content)
+            else:
+                print(f"Usage: {command} <filename>")
+        elif command == "save":
             vfs.save_state()
+        elif command == "load":
+            vfs.load_state()
+        elif command == "exit":
             break
         else:
-            print("Invalid command!")
-
-if __name__ == "__main__":
-    main()
+            print(f"Unknown command: {command}")
