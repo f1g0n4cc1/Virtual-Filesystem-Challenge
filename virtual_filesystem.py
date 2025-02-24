@@ -2,6 +2,8 @@ import os
 import json
 from datetime import datetime
 import bcrypt
+import sys
+import fnmatch
 
 class FileNode:
     def __init__(self, name, is_directory, owner="root", group="root", permissions="rwxr-xr-x", parent=None, is_symlink=False, target=None):
@@ -13,8 +15,8 @@ class FileNode:
         self.owner = owner
         self.group = group
         self.permissions = permissions
-        self.is_symlink = is_symlink  # Flag for symlinks
-        self.target = target  # Points to target file/directory for symlinks
+        self.is_symlink = is_symlink
+        self.target = target
 
 class VirtualFileSystem:
     LOG_FILE = "vfs.log"
@@ -28,11 +30,12 @@ class VirtualFileSystem:
     }
 
     def __init__(self):
+        root_password = os.getenv("ROOT_PASSWORD", "admin")
         self.root = FileNode("/", True, owner="root", group="root")
         self.current_directory = self.root
-        self.users = {"root": {"password": self.hash_password("admin"), "groups": ["root"], "role": "admin", "quota": self.DEFAULT_USER_QUOTA}}
+        self.users = {"root": {"password": self.hash_password(root_password), "groups": ["root"], "role": "admin", "quota": self.DEFAULT_USER_QUOTA}}
         self.groups = {"root": self.DEFAULT_GROUP_QUOTA}
-        self.versions = {}  # Stores file history
+        self.versions = {}
         self.current_user = "root"
 
     def hash_password(self, password):
@@ -179,10 +182,10 @@ class VirtualFileSystem:
         self.log_action(f"Created directory '{dirname}'")
         print(f"Directory '{dirname}' created.")
 
-    def touch(self, filename):
+    def touch(self, filename=None):
         """ Create an empty file if it does not exist """
         if not filename:
-            print("Error: Filename cannot be empty.")
+            print("Error: Missing filename. Usage: touch <filename>")
             return
         path = self._resolve_path(filename)
         parts = path.strip('/').split('/')
@@ -240,23 +243,27 @@ class VirtualFileSystem:
         self.log_action(f"Read from file '{filename}'")
         return node.content
 
-    def ls(self, path=None):
+    def ls(self, *args):
         """ List files and directories in the current directory """
-        if path and path.startswith('-'):  # Handle options like -l
-            option = path
-            path = None
-        else:
-            option = None
-        
+        option = None
+        path = None
+
+        # Parse arguments
+        for arg in args:
+            if arg.startswith('-'):
+                option = arg
+            else:
+                path = arg
+
         if path is None:
             node = self.current_directory
         else:
             node = self._get_node(self._resolve_path(path))
-        
+
         if node is None:
             print(f"Error: Directory '{path}' does not exist.")
             return
-        
+
         if node.is_directory:
             if option == '-l':
                 for child_name, child_node in node.children.items():
@@ -267,10 +274,26 @@ class VirtualFileSystem:
             else:
                 print(" ".join(node.children.keys()))
         else:
-            print(f"{path} is a file, not a directory!")
+            if option == '-l':
+                permissions = node.permissions
+                owner = node.owner
+                size = len(node.content)
+                print(f"{permissions} {owner} {size} {node.name}")
+            else:
+                print(f"{path} is a file, not a directory!")
 
     def cd(self, dirname):
         """ Change the current directory """
+        if dirname == ".":
+            return  # Stay in the same directory
+        elif dirname == "..":
+            if self.current_directory.parent:
+                self.current_directory = self.current_directory.parent
+                print(f"Changed directory to '{self.current_directory.name}'")
+            else:
+                print("Error: Already at the root directory.")
+            return
+
         path = self._resolve_path(dirname)
         node = self._get_node(path)
         if node is None or not node.is_directory:
@@ -282,7 +305,7 @@ class VirtualFileSystem:
     def rm(self, filename):
         """ Remove a file """
         if not filename:
-            print("Error: Filename cannot be empty.")
+            print("Error: Missing filename. Usage: rm <filename>")
             return
         path = self._resolve_path(filename)
         node = self._get_node(path)
@@ -299,7 +322,7 @@ class VirtualFileSystem:
     def mv(self, src, dest):
         """ Move or rename a file """
         if not src or not dest:
-            print("Error: Source and destination cannot be empty.")
+            print("Error: Source and destination cannot be empty. Usage: mv <source> <destination>")
             return
         src_path = self._resolve_path(src)
         dest_path = self._resolve_path(dest)
@@ -326,7 +349,7 @@ class VirtualFileSystem:
     def cp(self, src, dest):
         """ Copy a file """
         if not src or not dest:
-            print("Error: Source and destination cannot be empty.")
+            print("Error: Source and destination cannot be empty. Usage: cp <source> <destination>")
             return
         src_path = self._resolve_path(src)
         dest_path = self._resolve_path(dest)
@@ -348,9 +371,34 @@ class VirtualFileSystem:
         dest_parent_path = '/'.join(dest_path.split('/')[:-1])
         dest_parent = self._get_node(dest_parent_path) or self.root
         dest_name = dest_path.split('/')[-1]
-        dest_parent.children[dest_name] = FileNode(dest_name, False, owner=self.current_user, content=node.content)
+        new_file = FileNode(dest_name, False, owner=self.current_user, parent=dest_parent)
+        new_file.content = node.content  # Copy the content manually
+        dest_parent.children[dest_name] = new_file
         self.log_action(f"Copied '{src}' to '{dest}'")
         print(f"Copied '{src}' to '{dest}'")
+
+    def ln_s(self, target, link_name):
+        """ Create a symbolic link """
+        target_path = self._resolve_path(target)
+        link_path = self._resolve_path(link_name)
+        
+        if not self._path_exists(target_path):
+            print(f"Error: Target '{target}' does not exist.")
+            return
+        
+        if self._path_exists(link_path):
+            print(f"Error: Link name '{link_name}' already exists.")
+            return
+        
+        target_node = self._get_node(target_path)
+        link_parent_path = '/'.join(link_path.split('/')[:-1])
+        link_parent = self._get_node(link_parent_path) or self.root
+        link_name = link_path.split('/')[-1]
+        
+        link_node = FileNode(link_name, target_node.is_directory, owner=self.current_user, parent=link_parent, is_symlink=True, target=target_path)
+        link_parent.children[link_name] = link_node
+        self.log_action(f"Created symlink '{link_name}' -> '{target}'")
+        print(f"Created symlink '{link_name}' -> '{target}'")
 
     def save_state(self):
         """ Save the current state of the filesystem """
@@ -394,7 +442,79 @@ class VirtualFileSystem:
             node.content = data.get('content', '')
         return node
 
-# Command-line interface (CLI)
+    def add_user(self, username, password, role):
+        if username in self.users:
+            print(f"Error: User '{username}' already exists.")
+            return
+        if role not in self.ROLES:
+            print(f"Error: Role '{role}' does not exist.")
+            return
+        self.users[username] = {
+            "password": self.hash_password(password),
+            "groups": ["root"],
+            "role": role,
+            "quota": self.DEFAULT_USER_QUOTA
+        }
+        self.log_action(f"Created user '{username}' with role '{role}'")
+        print(f"User '{username}' created with role '{role}'")
+
+    def switch_user(self, username, password):
+        if username not in self.users:
+            print(f"Error: User '{username}' does not exist.")
+            return
+        if not self.verify_password(self.users[username]['password'], password):
+            print("Error: Incorrect password.")
+            return
+        self.current_user = username
+        self.log_action(f"Switched to user '{username}'")
+        print(f"Switched to user '{username}'")
+
+    def get_user_list(self):
+        """ Return a list of all user names in the system """
+        return list(self.users.keys())
+    
+    def search(self, pattern, path=None):
+        """ Search for files and directories matching the pattern """
+        if path is None:
+            node = self.root
+        else:
+            node = self._get_node(self._resolve_path(path))
+        
+        if node is None:
+            print(f"Error: Directory '{path}' does not exist.")
+            return []
+        
+        matches = []
+        for match in self._search_recursive(node, pattern):
+            matches.append(match)
+        
+        return matches
+
+    def _search_recursive(self, node, pattern, current_path=""):
+        """ Helper function to recursively search for files and directories """
+        if fnmatch.fnmatch(node.name, pattern):
+            yield current_path + "/" + node.name
+        
+        if node.is_directory:
+            for child_name, child_node in node.children.items():
+                yield from self._search_recursive(child_node, pattern, current_path + "/" + node.name)
+
+    def quota(self):
+        """ Display the current user's quota usage """
+        user_quota = self.users[self.current_user]['quota']
+        group = self.users[self.current_user]['groups'][0]
+        group_quota = self.groups.get(group, self.DEFAULT_GROUP_QUOTA)
+
+        # Calculate used space (for simplicity, only consider file content size)
+        used_space = sum(len(node.content) for node in self._all_files(self.root) if node.owner == self.current_user)
+        used_group_space = sum(len(node.content) for node in self._all_files(self.root) if node.group == group)
+
+        print(f"User '{self.current_user}' quota usage: {used_space}/{user_quota} bytes")
+        print(f"Group '{group}' quota usage: {used_group_space}/{group_quota} bytes")
+
+
+#Command-Line Interface for the Virtual File System
+
 if __name__ == "__main__":
     vfs = VirtualFileSystem()
     
@@ -404,7 +524,7 @@ if __name__ == "__main__":
             continue
         command = cmd[0]
         args = cmd[1:]
-
+        
         if command == "ls":
             vfs.ls(*args)
         elif command == "cd":
@@ -412,21 +532,36 @@ if __name__ == "__main__":
         elif command == "mkdir":
             vfs.mkdir(*args)
         elif command == "touch":
-            vfs.touch(*args)
+            if len(args) == 1:
+                vfs.touch(args[0])
+            else:
+                print("Usage: touch <filename>")
         elif command == "rm":
-            vfs.rm(*args)
+            if len(args) == 1:
+                vfs.rm(args[0])
+            else:
+                print("Usage: rm <filename>")
         elif command == "mv":
-            vfs.mv(*args)
+            if len(args) == 2:
+                vfs.mv(args[0], args[1])
+            else:
+                print("Usage: mv <source> <destination>")
         elif command == "cp":
-            vfs.cp(*args)
+            if len(args) == 2:
+                vfs.cp(args[0], args[1])
+            else:
+                print("Usage: cp <source> <destination>")
         elif command == "ln":
             if args and args[0] == "-s" and len(args) == 3:
                 vfs.ln_s(args[1], args[2])
             else:
                 print("Usage: ln -s <target> <link_name>")
         elif command == "write":
-            if len(args) == 2:
-                vfs.write(args[0], args[1])
+            if len(args) >= 2:
+                filename = args[0]
+                content = " ".join(args[1:])
+                vfs.write(filename, content)
+                print(f"Content written to file '{filename}'.")
             else:
                 print("Usage: write <filename> <content>")
         elif command in ["read", "cat"]:
@@ -442,5 +577,46 @@ if __name__ == "__main__":
             vfs.load_state()
         elif command == "exit":
             break
+        elif command == "adduser":
+            if len(args) == 3:
+                vfs.add_user(args[0], args[1], args[2])
+            else:
+                print("Usage: adduser <username> <password> <role>")
+        elif command == "su":
+            if len(args) == 2:
+                vfs.switch_user(args[0], args[1])
+            else:
+                print("Usage: su <username> <password>")
+        elif command == "listusers":
+            users = vfs.get_user_list()
+            print("Users:", ", ".join(users))
+        elif command == "search":
+            if len(args) == 1:
+                matches = vfs.search(args[0])
+            elif len(args) == 2:
+                matches = vfs.search(args[0], args[1])
+            else:
+                print("Usage: search <pattern> [path]")
+                continue
+            if matches:
+                print("Matches:")
+                for match in matches:
+                    print(match)
+            else:
+                print("No matches found.")
+        elif command == "file":
+            if len(args) == 1:
+                node = vfs._get_node(vfs._resolve_path(args[0]))
+                if node:
+                    permissions = node.permissions
+                    owner = node.owner
+                    size = len(node.content) if not node.is_directory else 0
+                    print(f"{permissions} {owner} {size} {node.name}")
+                else:
+                    print(f"Error: File '{args[0]}' does not exist.")
+            else:
+                print("Usage: file <filename>")
+        elif command == "quota":
+            vfs.quota()
         else:
             print(f"Unknown command: {command}")
